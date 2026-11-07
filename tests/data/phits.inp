@@ -1,0 +1,122 @@
+$MPI=10
+[ T i t l e ]
+Dose in a 40MeV Elec-Accelerator Facility caseJan
+
+[ P a r a m e t e r s ]
+ icntl    =          0                         # (D=0) 3:ECH 5:NOR 6:SRC 7,8:GSH 11:DSH 12:DUMP
+ maxcas   =     320000                       # (D=10) number of particles per one batch
+ maxbch   =     100                     # (D=10) number of batches
+  negs    =    1     
+ e-mode   =    2
+ icommat  =    1
+ kmout    =    1
+istdev    =    -2
+ MDBATIMA =    3000
+ dpnmax   =  10
+ infl:{m200.inp}
+
+[ S o u r c e ]
+s-type = 1 # Cylindrical Distribution Source
+proj = all # kind of incident particle
+dir = all # z-directions of beam [cosine]
+r0 = 1. # radius [cm]
+z0 = -5. # minimum position of x-axis [cm]
+z1 = 5. # maximum position of x-axis [cm]
+e-type = 28
+norm = 0
+ni = 1
+226Ra 37e8  # Ra226 @ 0.1Ci
+actlow = 1.0
+
+
+[Material]
+M1  82000 1
+M2  06000 -5E-3
+    26000 -0.995
+
+[Surface]
+$ --- 径向表面 (圆柱面) ---
+11 cz 2.0      $ 内腔半径
+30 cz 4.0      $ 铅层分割面 1
+31 cz 8.0      $ 铅层分割面 2 (调整为8.0，让厚度平分更均匀)
+32 cz 12.0     $ 铅罐最外半径 / 钢壳内半径 (替代原12号面)
+13 cz 12.5     $ 碳钢外壳外半径
+
+$ --- 轴向表面 (水平面) ---
+14 pz -12.5    $ 钢壳最底面
+15 pz -12.0    $ 铅最底面
+16 pz -2.0     $ 内腔底面
+17 pz 2.0      $ 内腔顶面
+18 pz 12.0     $ 铅最顶面
+19 pz 12.5     $ 钢壳最顶面
+
+99 so 50.0     $ 外部世界边界
+
+[Cell]
+$ --- 内部中心空腔 (源区) ---
+104  0         -11     16 -17
+
+$ --- 侧面铅屏蔽层 (沿半径切成3层，实现平滑分裂) ---
+100  1 -11.34  11 -30  16 -17   $ 铅内层 (厚度 2cm)
+110  1 -11.34  30 -31  16 -17   $ 铅中层 (厚度 4cm)
+111  1 -11.34  31 -32  16 -17   $ 铅外层 (厚度 4cm)
+
+$ --- 轴向铅屏蔽层 (上下端盖) ---
+105  1 -11.34  -32     15 -16   $ 底部铅垫 (外径直接到32)
+106  1 -11.34  -32     17 -18   $ 顶部铅盖 (外径直接到32)
+
+$ --- 碳钢外壳 ---
+101  2 -7.82   32 -13  15 -18   $ 侧面钢外包 (内径紧贴32)
+102  2 -7.82   -13     14 -15   $ 底部钢底座
+103  2 -7.82   -13     18 -19   $ 顶部钢外盖
+
+$ --- 外部世界与逃逸面 ---
+900  0         -99 #104 #100 #110 #111 #105 #106 #101 #102 #103
+901 -1          99
+
+[Importance]
+$ 显式指定 part = photon (或 p)，只对光子生效，避免中微子等粒子拖慢速度
+part = photon  
+reg          imp
+$ 1. 源区与内部
+104         1.000000
+$ 2. 侧面铅层逐步发生 3 倍左右的分裂
+100         2.000000
+110         6.000000
+111        18.000000
+$ 3. 顶底铅层（由于同样厚达10cm，也给予高重要度促进粒子穿透）
+( 105 106 ) 12.000000
+$ 4. 到达钢壳及外部世界，维持高重要度以便计数器捕捉粒子
+( 101 102 103 900 ) 36.000000
+
+
+[ T - T r a c k ]
+    title = H*(10) dose map around the Jar
+     mesh =  xyz            
+   y-type =   2             
+       ny =   100           
+     ymin =   -50           
+     ymax =   50.           
+   x-type =   2             
+       nx =   100             
+     xmin =   -50           
+     xmax =   50. 
+   z-type =    1            
+       nz =   1           
+            -50. 50.
+     e-type =    1            
+ne = 1            
+        1E-11 1E+3             
+     axis =   xy            # axis of output
+   unit =    1            # unit is [1/cm^2/source]
+   multiplier = all
+part = all
+     mat    mset1
+     all     (3.6E-3  -200)
+    z-txt = H*10($\mu$Sv/h)
+     part =  all
+     resfile = local.001
+     file = local_dosemap_xy.out  
+
+
+[End]
