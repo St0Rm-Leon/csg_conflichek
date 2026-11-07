@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "csg-conflichek"
 version = "0.1.0"
 description = "PHITS CSG overlap and undefined-region checker"
-readme = { file = "STEPS", content-type = "text/markdown" }
+license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.13"
 dependencies = [
     "numpy==2.4.4",

@@ -1,4 +1,5 @@
 AGENTS.md
+STEPS
 __pycache__/
 *.py[cod]
 .pytest_cache/

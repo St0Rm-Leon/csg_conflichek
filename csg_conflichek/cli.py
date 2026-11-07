@@ -7,7 +7,12 @@ from pathlib import Path
 
 from . import __version__
 from .bounds import Bounds, BoundsError, estimate_bounds
-from .conflict import count_by_type, scan_conflicts, write_conflicts_csv
+from .conflict import (
+    compare_scans,
+    count_by_type,
+    scan_conflicts,
+    write_conflicts_csv,
+)
 from .phits_geom_syntax import load_phits_text
 
 
@@ -69,6 +74,16 @@ def _build_parser():
         help="worker processes for large grids (0 = auto, default: 0)",
     )
     parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="run a second scan at --verify-size and report stability",
+    )
+    parser.add_argument(
+        "--verify-size",
+        default=None,
+        help="verification grid size (default: double the primary size)",
+    )
+    parser.add_argument(
         "--no-merge",
         action="store_true",
         help="write every conflicting grid point instead of merged blocks",
@@ -88,9 +103,58 @@ def _build_parser():
     return parser
 
 
+def _relative_change(base, verify):
+    if base == 0:
+        return 0.0 if verify == 0 else float("inf")
+    return (verify - base) / base
+
+
+def _format_change(base, verify):
+    if base == 0:
+        return "n/a" if verify == 0 else "new"
+    return f"{(verify - base) / base:+.2%}"
+
+
+def _print_verification(report, quiet):
+    warnings = []
+    if abs(_relative_change(report.base_overlap_volume, report.verify_overlap_volume)) > 0.05:
+        warnings.append("overlap volume changed by more than 5%")
+    if abs(_relative_change(report.base_undefined_volume, report.verify_undefined_volume)) > 0.05:
+        warnings.append("undefined volume changed by more than 5%")
+    if report.base_overlap_blocks != report.verify_overlap_blocks:
+        warnings.append("overlap block count changed")
+    if report.base_undefined_blocks != report.verify_undefined_blocks:
+        warnings.append("undefined block count changed")
+
+    if not quiet:
+        print(
+            "verify: "
+            f"{report.base_size[0]}x{report.base_size[1]}x{report.base_size[2]} -> "
+            f"{report.verify_size[0]}x{report.verify_size[1]}x{report.verify_size[2]}"
+        )
+        print(
+            "overlap volume: "
+            f"{report.base_overlap_volume:.6g} -> {report.verify_overlap_volume:.6g} "
+            f"({_format_change(report.base_overlap_volume, report.verify_overlap_volume)})"
+        )
+        print(
+            "undefined volume: "
+            f"{report.base_undefined_volume:.6g} -> {report.verify_undefined_volume:.6g} "
+            f"({_format_change(report.base_undefined_volume, report.verify_undefined_volume)})"
+        )
+        print(f"overlap blocks: {report.base_overlap_blocks} -> {report.verify_overlap_blocks}")
+        print(
+            f"undefined blocks: {report.base_undefined_blocks} -> {report.verify_undefined_blocks}"
+        )
+
+    for warning in warnings:
+        print(f"csgc: warning: {warning}", file=sys.stderr)
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
+    report = None
 
     try:
         path = Path(args.input)
@@ -114,9 +178,29 @@ def main(argv=None):
             workers=args.workers,
         )
         output = write_conflicts_csv(blocks, args.output)
+
+        if args.verify:
+            if args.verify_size is None:
+                verify_size = tuple(value * 2 for value in size)
+                if verify_size[0] * verify_size[1] * verify_size[2] > 200_000_000:
+                    raise ValueError("verification grid is too large; provide --verify-size")
+            else:
+                verify_size = parse_size(args.verify_size)
+            base_blocks = None if args.no_merge else blocks
+            report = compare_scans(
+                model,
+                bounds,
+                size,
+                verify_size,
+                workers=args.workers,
+                base_blocks=base_blocks,
+            )
     except (BoundsError, OSError, ValueError) as exc:
         print(f"csgc: error: {exc}", file=sys.stderr)
         return 1
+
+    if report is not None:
+        _print_verification(report, args.quiet)
 
     if not args.quiet:
         overlaps, undefined = count_by_type(blocks)

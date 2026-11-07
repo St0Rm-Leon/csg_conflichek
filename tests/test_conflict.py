@@ -1,6 +1,7 @@
 import csv
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from csg_conflichek import shapes as sp
@@ -11,6 +12,7 @@ from csg_conflichek.conflict import (
     UNDEFINED,
     ConflictBlock,
     ConflictPoint,
+    compare_scans,
     count_by_type,
     find_conflict_points,
     merge_conflict_points,
@@ -63,10 +65,25 @@ def test_merge_adjacent_points_into_one_block():
 
     assert len(blocks) == 1
     assert blocks[0].point_count == 4
-    assert blocks[0].x == pytest.approx(0.5)
-    assert blocks[0].y == pytest.approx(0.5)
+    assert blocks[0].x == pytest.approx(0.0)
+    assert blocks[0].y == pytest.approx(0.0)
     assert blocks[0].z == pytest.approx(0.0)
     assert blocks[0].cell_ids == (1, 2)
+
+
+def test_representative_point_is_inside_nonconvex_block():
+    points = [
+        ConflictPoint(0, 0, 0, 0.0, 0.0, 0.0, OVERLAP, (1, 2)),
+        ConflictPoint(1, 0, 0, 1.0, 0.0, 0.0, OVERLAP, (1, 2)),
+        ConflictPoint(0, 1, 0, 0.0, 1.0, 0.0, OVERLAP, (1, 2)),
+        ConflictPoint(0, 2, 0, 0.0, 2.0, 0.0, OVERLAP, (1, 2)),
+    ]
+
+    blocks = merge_conflict_points(points)
+
+    assert len(blocks) == 1
+    assert (blocks[0].x, blocks[0].y, blocks[0].z) == (0.0, 1.0, 0.0)
+    assert blocks[0].point_count == 4
 
 
 def test_merge_keeps_different_claims_separate():
@@ -109,7 +126,7 @@ def test_optimized_merge_matches_point_merge():
     size = (20, 20, 20)
 
     points = find_conflict_points(model, bounds, size)
-    expected = merge_conflict_points(points)
+    expected = merge_conflict_points(points, bounds, size)
     actual = scan_conflicts(model, bounds, size, workers=1)
 
     assert len(actual) == len(expected)
@@ -169,3 +186,54 @@ def test_more_than_64_cells_use_multiple_code_words():
     assert len(overlaps) == 1
     assert overlaps[0].cell_ids == tuple(range(1, 71))
     assert overlaps[0].point_count == 360
+
+
+def test_representative_points_are_actual_block_points():
+    model = _overlap_model()
+    bounds = Bounds(-3, 3, -3, 3, -3, 3)
+    size = (20, 20, 20)
+    x_axis = np.linspace(bounds.xmin, bounds.xmax, size[0])
+    y_axis = np.linspace(bounds.ymin, bounds.ymax, size[1])
+    z_axis = np.linspace(bounds.zmin, bounds.zmax, size[2])
+
+    blocks = scan_conflicts(model, bounds, size, workers=1)
+    assert blocks
+
+    for block in blocks:
+        ix = int(np.argmin(np.abs(x_axis - block.x)))
+        iy = int(np.argmin(np.abs(y_axis - block.y)))
+        iz = int(np.argmin(np.abs(z_axis - block.z)))
+        assert block.x == pytest.approx(float(x_axis[ix]))
+        assert block.y == pytest.approx(float(y_axis[iy]))
+        assert block.z == pytest.approx(float(z_axis[iz]))
+
+        masks = model.geometry.claim_masks(x_axis[ix], y_axis[iy], z_axis[iz])
+        claimant_ids = tuple(
+            sorted(model.geometry.cell_ids[index] for index in np.flatnonzero(masks))
+        )
+        if block.type == OVERLAP:
+            assert claimant_ids == block.cell_ids
+        else:
+            assert claimant_ids == ()
+
+
+def test_compare_scans_reports_stability_fields():
+    model = _overlap_model()
+    bounds = Bounds(-3, 3, -3, 3, -3, 3)
+
+    report = compare_scans(
+        model,
+        bounds,
+        (10, 10, 10),
+        (20, 20, 20),
+        workers=1,
+    )
+
+    assert report.base_size == (10, 10, 10)
+    assert report.verify_size == (20, 20, 20)
+    assert report.base_overlap_points > 0
+    assert report.verify_overlap_points > 0
+    assert report.base_overlap_blocks >= 1
+    assert report.verify_overlap_blocks >= 1
+    assert report.base_overlap_volume > 0
+    assert report.verify_overlap_volume > 0

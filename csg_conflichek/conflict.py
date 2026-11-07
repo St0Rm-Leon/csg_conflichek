@@ -195,16 +195,31 @@ def _resolve_workers(workers, size):
     return min(workers, size[2])
 
 
-def _mean_coordinates(indices, bounds, size):
-    nx, ny, _ = size
+def _index_coordinates(flat_index, bounds, size):
+    nx, ny, nz = size
+    iz, remainder = divmod(int(flat_index), nx * ny)
+    iy, ix = divmod(remainder, nx)
+    x = bounds.xmin + ix * (bounds.xmax - bounds.xmin) / (nx - 1)
+    y = bounds.ymin + iy * (bounds.ymax - bounds.ymin) / (ny - 1)
+    z = bounds.zmin + iz * (bounds.zmax - bounds.zmin) / (nz - 1)
+    return x, y, z
+
+
+def _nearest_index(indices, bounds, size):
+    nx, ny, nz = size
     ix = indices % nx
     iy = (indices // nx) % ny
-    iz = indices // (ny * nx)
-
-    x = bounds.xmin + float(ix.mean()) * (bounds.xmax - bounds.xmin) / (nx - 1)
-    y = bounds.ymin + float(iy.mean()) * (bounds.ymax - bounds.ymin) / (ny - 1)
-    z = bounds.zmin + float(iz.mean()) * (bounds.zmax - bounds.zmin) / (size[2] - 1)
-    return x, y, z
+    iz = indices // (nx * ny)
+    mean_x = float(ix.mean())
+    mean_y = float(iy.mean())
+    mean_z = float(iz.mean())
+    dx = (bounds.xmax - bounds.xmin) / (nx - 1)
+    dy = (bounds.ymax - bounds.ymin) / (ny - 1)
+    dz = (bounds.zmax - bounds.zmin) / (nz - 1)
+    dist2 = ((ix - mean_x) * dx) ** 2 + ((iy - mean_y) * dy) ** 2 + ((iz - mean_z) * dz) ** 2
+    tolerance = max(dx, dy, dz) ** 2 * 1e-12
+    close = indices[dist2 <= float(dist2.min()) + tolerance]
+    return int(close.min())
 
 
 def _merge_indices_dense(indices, cell_ids, bounds, size, ix, iy, iz):
@@ -225,27 +240,49 @@ def _merge_indices_dense(indices, cell_ids, bounds, size, ix, iy, iz):
 
     conflict_labels = labels.ravel()[local]
     sizes = np.bincount(conflict_labels, minlength=count + 1)
-    sum_x = np.bincount(conflict_labels, weights=ix - x0, minlength=count + 1)
-    sum_y = np.bincount(conflict_labels, weights=iy - y0, minlength=count + 1)
-    sum_z = np.bincount(conflict_labels, weights=iz - z0, minlength=count + 1)
+    sum_x = np.bincount(conflict_labels, weights=ix, minlength=count + 1)
+    sum_y = np.bincount(conflict_labels, weights=iy, minlength=count + 1)
+    sum_z = np.bincount(conflict_labels, weights=iz, minlength=count + 1)
+
+    centroid_x = sum_x[1:] / sizes[1:]
+    centroid_y = sum_y[1:] / sizes[1:]
+    centroid_z = sum_z[1:] / sizes[1:]
+    label_offset = conflict_labels - 1
+    dx = (bounds.xmax - bounds.xmin) / (nx - 1)
+    dy = (bounds.ymax - bounds.ymin) / (ny - 1)
+    dz = (bounds.zmax - bounds.zmin) / (nz - 1)
+    dist2 = (
+        ((ix - centroid_x[label_offset]) * dx) ** 2
+        + ((iy - centroid_y[label_offset]) * dy) ** 2
+        + ((iz - centroid_z[label_offset]) * dz) ** 2
+    )
+
+    order = np.lexsort((indices, dist2, conflict_labels))
+    sorted_labels = conflict_labels[order]
+    sorted_dist = dist2[order]
+    sorted_indices = indices[order]
+    boundaries = np.flatnonzero(sorted_labels[1:] != sorted_labels[:-1]) + 1
+    starts = np.r_[0, boundaries]
+    ends = np.r_[boundaries, len(sorted_labels)]
+    present_labels = sorted_labels[starts]
+    tolerance = max(dx, dy, dz) ** 2 * 1e-12
 
     block_type = OVERLAP if cell_ids else UNDEFINED
     blocks = []
-    for label in range(1, count + 1):
-        point_count = int(sizes[label])
-        if point_count == 0:
-            continue
-        mean_x = x0 + float(sum_x[label]) / point_count
-        mean_y = y0 + float(sum_y[label]) / point_count
-        mean_z = z0 + float(sum_z[label]) / point_count
+    for start, end, label in zip(starts, ends, present_labels):
+        group_dist = sorted_dist[start:end]
+        group_indices = sorted_indices[start:end]
+        minimum = float(group_dist[0])
+        best_index = int(group_indices[group_dist <= minimum + tolerance].min())
+        x, y, z = _index_coordinates(best_index, bounds, size)
         blocks.append(
             ConflictBlock(
                 type=block_type,
-                x=bounds.xmin + mean_x * (bounds.xmax - bounds.xmin) / (nx - 1),
-                y=bounds.ymin + mean_y * (bounds.ymax - bounds.ymin) / (ny - 1),
-                z=bounds.zmin + mean_z * (bounds.zmax - bounds.zmin) / (nz - 1),
+                x=x,
+                y=y,
+                z=z,
                 cell_ids=cell_ids,
-                point_count=point_count,
+                point_count=int(sizes[label]),
             )
         )
     return blocks
@@ -289,7 +326,8 @@ def _merge_indices_sparse(indices, cell_ids, bounds, size):
                     stack.append(neighbor)
 
         index_array = np.array(component, dtype=np.int64)
-        x, y, z = _mean_coordinates(index_array, bounds, size)
+        best_index = _nearest_index(index_array, bounds, size)
+        x, y, z = _index_coordinates(best_index, bounds, size)
         blocks.append(
             ConflictBlock(
                 type=block_type,
@@ -336,7 +374,15 @@ def _merge_batches(overlap_groups, undefined_indices, bounds, size, cell_ids):
         )
         blocks.extend(_merge_indices(indices, (), bounds, size))
 
-    blocks.sort(key=lambda block: (block.type != OVERLAP, block.x, block.y, block.z))
+    blocks.sort(
+        key=lambda block: (
+            block.type != OVERLAP,
+            block.x,
+            block.y,
+            block.z,
+            block.cell_ids,
+        )
+    )
     return blocks
 
 
@@ -396,11 +442,7 @@ def find_conflict_points(model, bounds, size):
     return _batches_to_points(model, bounds, size, batches)
 
 
-def _mean(values):
-    return sum(values) / len(values)
-
-
-def _merge_group(points):
+def _merge_group(points, bounds=None, size=None):
     by_index = {(point.ix, point.iy, point.iz): point for point in points}
     remaining = set(by_index)
     blocks = []
@@ -425,14 +467,45 @@ def _merge_group(points):
                     component.append(by_index[neighbor])
                     queue.append(neighbor)
 
-        first = component[0]
+        if bounds is not None and size is not None:
+            nx, ny, nz = size
+            index_array = np.array(
+                [(point.iz * ny + point.iy) * nx + point.ix for point in component],
+                dtype=np.int64,
+            )
+            best_index = _nearest_index(index_array, bounds, size)
+            x, y, z = _index_coordinates(best_index, bounds, size)
+            block_type = component[0].type
+            cell_ids = component[0].cell_ids
+        else:
+            mean_x = sum(point.x for point in component) / len(component)
+            mean_y = sum(point.y for point in component) / len(component)
+            mean_z = sum(point.z for point in component) / len(component)
+            distances = [
+                (point.x - mean_x) ** 2 + (point.y - mean_y) ** 2 + (point.z - mean_z) ** 2
+                for point in component
+            ]
+            minimum = min(distances)
+            tolerance = max(1.0, max(distances)) * 1e-12
+            best = min(
+                (
+                    point
+                    for point, distance in zip(component, distances)
+                    if distance <= minimum + tolerance
+                ),
+                key=lambda point: (point.iz, point.iy, point.ix),
+            )
+            x, y, z = best.x, best.y, best.z
+            block_type = best.type
+            cell_ids = best.cell_ids
+
         blocks.append(
             ConflictBlock(
-                type=first.type,
-                x=_mean([point.x for point in component]),
-                y=_mean([point.y for point in component]),
-                z=_mean([point.z for point in component]),
-                cell_ids=first.cell_ids,
+                type=block_type,
+                x=x,
+                y=y,
+                z=z,
+                cell_ids=cell_ids,
                 point_count=len(component),
             )
         )
@@ -440,16 +513,24 @@ def _merge_group(points):
     return blocks
 
 
-def merge_conflict_points(points):
+def merge_conflict_points(points, bounds=None, size=None):
     groups = {}
     for point in points:
         groups.setdefault(point.group, []).append(point)
 
     blocks = []
     for group_points in groups.values():
-        blocks.extend(_merge_group(group_points))
+        blocks.extend(_merge_group(group_points, bounds, size))
 
-    blocks.sort(key=lambda block: (block.type != OVERLAP, block.x, block.y, block.z))
+    blocks.sort(
+        key=lambda block: (
+            block.type != OVERLAP,
+            block.x,
+            block.y,
+            block.z,
+            block.cell_ids,
+        )
+    )
     return blocks
 
 
@@ -488,7 +569,76 @@ def scan_conflicts(model, bounds, size=(200, 200, 200), merge=True, workers=0):
         )
 
     points = _batches_to_points(model, bounds, size, batches)
-    return merge_conflict_points(points)
+    return merge_conflict_points(points, bounds, size)
+
+
+@dataclass(frozen=True)
+class StabilityReport:
+    base_size: tuple[int, int, int]
+    verify_size: tuple[int, int, int]
+    base_overlap_points: int
+    verify_overlap_points: int
+    base_undefined_points: int
+    verify_undefined_points: int
+    base_overlap_blocks: int
+    verify_overlap_blocks: int
+    base_undefined_blocks: int
+    verify_undefined_blocks: int
+    base_overlap_volume: float
+    verify_overlap_volume: float
+    base_undefined_volume: float
+    verify_undefined_volume: float
+
+
+def _summary(blocks, bounds, size):
+    nx, ny, nz = size
+    cell_volume = (
+        (bounds.xmax - bounds.xmin)
+        / (nx - 1)
+        * (bounds.ymax - bounds.ymin)
+        / (ny - 1)
+        * (bounds.zmax - bounds.zmin)
+        / (nz - 1)
+    )
+    overlap_points = sum(block.point_count for block in blocks if block.type == OVERLAP)
+    undefined_points = sum(block.point_count for block in blocks if block.type == UNDEFINED)
+    return {
+        "overlap_points": overlap_points,
+        "undefined_points": undefined_points,
+        "overlap_blocks": sum(1 for block in blocks if block.type == OVERLAP),
+        "undefined_blocks": sum(1 for block in blocks if block.type == UNDEFINED),
+        "overlap_volume": overlap_points * cell_volume,
+        "undefined_volume": undefined_points * cell_volume,
+    }
+
+
+def compare_scans(model, bounds, size, verify_size, workers=0, base_blocks=None):
+    size = tuple(int(value) for value in size)
+    verify_size = tuple(int(value) for value in verify_size)
+    if min(size) < 2 or min(verify_size) < 2:
+        raise ValueError("grid size values must be >= 2")
+
+    if base_blocks is None:
+        base_blocks = scan_conflicts(model, bounds, size=size, workers=workers)
+    verify_blocks = scan_conflicts(model, bounds, size=verify_size, workers=workers)
+    base = _summary(base_blocks, bounds, size)
+    verify = _summary(verify_blocks, bounds, verify_size)
+    return StabilityReport(
+        base_size=size,
+        verify_size=verify_size,
+        base_overlap_points=base["overlap_points"],
+        verify_overlap_points=verify["overlap_points"],
+        base_undefined_points=base["undefined_points"],
+        verify_undefined_points=verify["undefined_points"],
+        base_overlap_blocks=base["overlap_blocks"],
+        verify_overlap_blocks=verify["overlap_blocks"],
+        base_undefined_blocks=base["undefined_blocks"],
+        verify_undefined_blocks=verify["undefined_blocks"],
+        base_overlap_volume=base["overlap_volume"],
+        verify_overlap_volume=verify["overlap_volume"],
+        base_undefined_volume=base["undefined_volume"],
+        verify_undefined_volume=verify["undefined_volume"],
+    )
 
 
 def _cell_columns(block):

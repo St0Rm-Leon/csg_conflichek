@@ -148,6 +148,32 @@ def test_cli_workers(tmp_path):
     assert any(row["type"] == "overlap" for row in rows)
 
 
+def test_cli_verify(tmp_path, capsys):
+    output = tmp_path / "verify.csv"
+
+    code = main(
+        [
+            "-i",
+            str(EXAMPLES / "overlap_phits.inp"),
+            "-o",
+            str(output),
+            "--size",
+            "10",
+            "--verify",
+            "--verify-size",
+            "15",
+            "--workers",
+            "1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "verify: 10x10x10 -> 15x15x15" in captured.out
+    assert "overlap volume:" in captured.out
+    assert "undefined volume:" in captured.out
+
+
 def test_cli_missing_input(tmp_path):
     code = main(["-i", str(tmp_path / "missing.inp"), "-o", str(tmp_path / "out.csv")])
 
